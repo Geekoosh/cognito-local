@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import type {
   DeliveryMediumType,
   RespondToAuthChallengeRequest,
@@ -12,6 +13,7 @@ import {
   UserNotConfirmedException,
 } from "../errors";
 import type { Services } from "../services";
+import * as srp from "../services/srp";
 import { verify as verifyTotp } from "../services/totp";
 import {
   attributeValue,
@@ -100,7 +102,8 @@ export const RespondToAuthChallenge =
     const userPoolClient = await cognito.getAppClient(ctx, req.ClientId);
 
     if (req.ChallengeName === "PASSWORD_VERIFIER") {
-      if (!req.ChallengeResponses.PASSWORD_CLAIM_SECRET_BLOCK) {
+      const secretBlock = req.ChallengeResponses.PASSWORD_CLAIM_SECRET_BLOCK;
+      if (!secretBlock) {
         throw new InvalidParameterError(
           "Missing required parameter PASSWORD_CLAIM_SECRET_BLOCK",
         );
@@ -108,17 +111,18 @@ export const RespondToAuthChallenge =
       if (!req.ChallengeResponses.TIMESTAMP) {
         throw new InvalidParameterError("Missing required parameter TIMESTAMP");
       }
-
-      // Decode the SECRET_BLOCK that was generated in InitiateAuth's USER_SRP_AUTH flow.
-      // It contains the username and password for plaintext verification.
-      let secretPayload: { username: string; password: string };
-      try {
-        secretPayload = JSON.parse(
-          Buffer.from(
-            req.ChallengeResponses.PASSWORD_CLAIM_SECRET_BLOCK,
-            "base64",
-          ).toString(),
+      if (!req.ChallengeResponses.PASSWORD_CLAIM_SIGNATURE) {
+        throw new InvalidParameterError(
+          "Missing required parameter PASSWORD_CLAIM_SIGNATURE",
         );
+      }
+
+      // Recover the server SRP state stashed in SECRET_BLOCK during InitiateAuth,
+      // re-derive the shared secret, and verify the client's M1 proof — the
+      // signature is the only thing that depends on the entered password.
+      let serverState: srp.SrpServerState;
+      try {
+        serverState = srp.decodeSecretBlock(secretBlock);
       } catch {
         throw new NotAuthorizedError();
       }
@@ -130,8 +134,38 @@ export const RespondToAuthChallenge =
       if (!user || !userPoolClient) {
         throw new NotAuthorizedError();
       }
-      if (user.Password !== secretPayload.password) {
-        throw new NotAuthorizedError();
+
+      const poolName = srp.poolNameFromId(userPool.options.Id);
+      const A = BigInt(`0x${serverState.aHex}`);
+      const b = BigInt(`0x${serverState.bHex}`);
+      const verifier = srp.deriveVerifier(
+        poolName,
+        user.Username,
+        user.Password,
+        serverState.saltHex,
+      );
+      const B = srp.computeB(b, verifier);
+      const u = srp.computeU(A, B);
+      const S = srp.computeServerS(A, verifier, u, b);
+      const key = srp.deriveKey(S, u);
+      const expectedSignature = srp.computeM1(
+        key,
+        poolName,
+        user.Username,
+        secretBlock,
+        req.ChallengeResponses.TIMESTAMP,
+      );
+
+      const provided = Buffer.from(
+        req.ChallengeResponses.PASSWORD_CLAIM_SIGNATURE,
+        "base64",
+      );
+      const expected = Buffer.from(expectedSignature, "base64");
+      if (
+        provided.length !== expected.length ||
+        !timingSafeEqual(provided, expected)
+      ) {
+        throw new NotAuthorizedError("Incorrect username or password.");
       }
       if (user.UserStatus === "UNCONFIRMED") {
         throw new UserNotConfirmedException();

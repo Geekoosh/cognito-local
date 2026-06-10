@@ -89,7 +89,7 @@ export const GetTokensFromRefreshToken =
         IdToken: tokens.IdToken,
         RefreshToken: undefined,
         TokenType: "Bearer",
-        ExpiresIn: undefined,
+        ExpiresIn: tokens.ExpiresIn,
       },
     };
   };
