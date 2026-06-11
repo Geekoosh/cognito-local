@@ -91,6 +91,7 @@ export interface Tokens {
   readonly AccessToken: string;
   readonly IdToken: string;
   readonly RefreshToken: string;
+  readonly ExpiresIn: number;
 }
 
 export interface TokenGenerator {
@@ -127,6 +128,34 @@ const formatExpiration = (
   assertUnitAnyCase(unit);
 
   return `${duration}${unit}`;
+};
+
+type LongTimeUnit = "seconds" | "minutes" | "hours" | "days";
+
+const UNIT_SECONDS: Record<LongTimeUnit, number> = {
+  seconds: 1,
+  minutes: 60,
+  hours: 3600,
+  days: 86400,
+};
+
+const isLongTimeUnit = (unit: string): unit is LongTimeUnit =>
+  unit in UNIT_SECONDS;
+
+const expiresInSeconds = (
+  duration: number | undefined,
+  unit: TimeUnitsType,
+  fallback: number,
+): number => {
+  if (duration === undefined) {
+    return fallback;
+  }
+
+  if (!isLongTimeUnit(unit)) {
+    throw new Error(`Invalid unit: ${unit}`);
+  }
+
+  return duration * UNIT_SECONDS[unit];
 };
 
 export class JwtTokenGenerator implements TokenGenerator {
@@ -265,6 +294,13 @@ export class JwtTokenGenerator implements TokenGenerator {
       : `${this.tokenConfig.IssuerDomain}/${userPoolClient.UserPoolId}`;
 
     return {
+      ExpiresIn: expiresInSeconds(
+        userPoolClient.AccessTokenValidity,
+        userPoolClient.TokenValidityUnits?.AccessToken ?? "hours",
+        // Match the access-token JWT's "24h" default below so the advertised
+        // TTL equals the token's real exp.
+        24 * 60 * 60,
+      ),
       AccessToken: jwt.sign(accessTokenMutable, PrivateKey.pem, {
         algorithm: "RS256",
         issuer,

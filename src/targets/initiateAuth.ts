@@ -16,6 +16,7 @@ import {
 import type { Services, UserPoolService } from "../services";
 import type { AppClient } from "../services/appClient";
 import type { Context } from "../services/context";
+import * as srp from "../services/srp";
 import { verifyRefreshToken } from "../services/tokenVerifier";
 import {
   attributesToRecord,
@@ -337,7 +338,7 @@ const refreshTokenAuthFlow = async (
       IdToken: tokens.IdToken,
       NewDeviceMetadata: undefined,
       TokenType: undefined,
-      ExpiresIn: undefined,
+      ExpiresIn: tokens.ExpiresIn,
     },
   };
 };
@@ -358,7 +359,10 @@ const userSrpAuthFlow = async (
     throw new InvalidParameterError("Missing required parameter SRP_A");
   }
 
-  const user = await userPool.getUserByUsername(ctx, req.AuthParameters.USERNAME);
+  const user = await userPool.getUserByUsername(
+    ctx,
+    req.AuthParameters.USERNAME,
+  );
   if (!user) {
     throw new NotAuthorizedError();
   }
@@ -369,23 +373,39 @@ const userSrpAuthFlow = async (
     return newPasswordChallenge(user);
   }
 
-  // Simplified SRP: return fake SRP parameters with the password encoded in
-  // SECRET_BLOCK so RespondToAuthChallenge can verify it via plaintext comparison.
-  // This is a local dev tool — real SRP crypto adds no security value.
-  const secretBlock = Buffer.from(
-    JSON.stringify({
-      username: user.Username,
-      password: user.Password,
-      userPoolId: userPool.options.Id,
-    }),
-  ).toString("base64");
+  let A: bigint;
+  try {
+    A = BigInt(`0x${req.AuthParameters.SRP_A}`);
+  } catch {
+    throw new InvalidParameterError("Invalid SRP_A");
+  }
+  if (A % srp.N === BigInt(0)) {
+    throw new NotAuthorizedError();
+  }
+
+  const poolName = srp.poolNameFromId(userPool.options.Id);
+  const saltHex = crypto.randomBytes(16).toString("hex");
+  const verifier = srp.deriveVerifier(
+    poolName,
+    user.Username,
+    user.Password,
+    saltHex,
+  );
+  const { b, B } = srp.generateServerEphemeral(verifier);
+
+  const secretBlock = srp.encodeSecretBlock({
+    username: user.Username,
+    saltHex,
+    bHex: b.toString(16),
+    aHex: A.toString(16),
+  });
 
   return {
     ChallengeName: "PASSWORD_VERIFIER",
     ChallengeParameters: {
-      SALT: crypto.randomBytes(16).toString("hex"),
+      SALT: saltHex,
       SECRET_BLOCK: secretBlock,
-      SRP_B: crypto.randomBytes(256).toString("hex"),
+      SRP_B: B.toString(16),
       USER_ID_FOR_SRP: user.Username,
       USERNAME: user.Username,
     },
