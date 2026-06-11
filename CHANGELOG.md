@@ -1,3 +1,16 @@
+# [1.0.0-dev.10](https://github.com/Geekoosh/cognito-local/compare/v1.0.0-dev.9...v1.0.0-dev.10) (2026-06-11)
+
+
+### Bug Fixes
+
+* **srp:** address review — guard SRP_A, align ExpiresIn default, honor TTL in OAuth2 ([071e01a](https://github.com/Geekoosh/cognito-local/commit/071e01a65ccc1cbe395310800ac8846dde0073f8))
+
+
+### Features
+
+* **oauth:** add oauth2 authorization code flow with PKCE support ([#471](https://github.com/Geekoosh/cognito-local/issues/471)) ([3e137f6](https://github.com/Geekoosh/cognito-local/commit/3e137f60679cec10770aee6af9c9597fbcf8e340))
+* **srp:** cryptographically verify USER_SRP_AUTH passwords + emit token TTLs ([a5088aa](https://github.com/Geekoosh/cognito-local/commit/a5088aaeb32cd7ac97f52a7cc74e4d6a651f9d64))
+
 # [1.0.0-dev.9](https://github.com/Geekoosh/cognito-local/compare/v1.0.0-dev.8...v1.0.0-dev.9) (2026-04-20)
 
 
