@@ -1,3 +1,15 @@
+# [1.0.0-dev.11](https://github.com/Geekoosh/cognito-local/compare/v1.0.0-dev.10...v1.0.0-dev.11) (2026-07-19)
+
+
+### Bug Fixes
+
+* align MFA errors with Cognito ([1e118b5](https://github.com/Geekoosh/cognito-local/commit/1e118b5ea422d579f57e888cbb89e75d7b01acbf))
+
+
+### Features
+
+* implement forced MFA setup flow ([b112206](https://github.com/Geekoosh/cognito-local/commit/b112206a5119cf5b7be65d4839598ca743232662))
+
 # [1.0.0-dev.10](https://github.com/Geekoosh/cognito-local/compare/v1.0.0-dev.9...v1.0.0-dev.10) (2026-06-11)
 
 
