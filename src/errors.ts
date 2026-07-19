@@ -101,3 +101,31 @@ export class InvalidParameterError extends CognitoError {
     super("InvalidParameterException", message);
   }
 }
+
+export class InvalidUserPoolConfigurationError extends CognitoError {
+  public constructor(message = "Invalid user pool configuration.") {
+    super("InvalidUserPoolConfigurationException", message);
+  }
+}
+
+export class SoftwareTokenMFANotFoundError extends CognitoError {
+  public constructor(
+    message = "Software token MFA is not enabled for the user pool.",
+  ) {
+    super("SoftwareTokenMFANotFoundException", message);
+  }
+}
+
+export class OperationNotEnabledError extends CognitoError {
+  public constructor(
+    message = "The requested operation is not enabled for this user pool.",
+  ) {
+    super("OperationNotEnabledException", message);
+  }
+}
+
+export class MFAMethodNotFoundError extends CognitoError {
+  public constructor(message = "MFA method not found.") {
+    super("MFAMethodNotFoundException", message);
+  }
+}

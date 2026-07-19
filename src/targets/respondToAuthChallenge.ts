@@ -8,7 +8,10 @@ import { v4 } from "uuid";
 import {
   CodeMismatchError,
   InvalidParameterError,
+  InvalidUserPoolConfigurationError,
+  MFAMethodNotFoundError,
   NotAuthorizedError,
+  SoftwareTokenMFANotFoundError,
   UnsupportedError,
   UserNotConfirmedException,
 } from "../errors";
@@ -20,6 +23,8 @@ import {
   type MFAOption,
   type User,
 } from "../services/userPoolService";
+import { verifyMfaChallenge } from "./initiateAuth";
+import { validateMfaSession } from "./mfaValidation";
 import type { Target } from "./Target";
 
 export type RespondToAuthChallengeTarget = Target<
@@ -29,7 +34,13 @@ export type RespondToAuthChallengeTarget = Target<
 
 type RespondToAuthChallengeService = Pick<
   Services,
-  "clock" | "cognito" | "messages" | "otp" | "triggers" | "tokenGenerator"
+  | "clock"
+  | "cognito"
+  | "messages"
+  | "otp"
+  | "sessions"
+  | "triggers"
+  | "tokenGenerator"
 >;
 
 const sendSmsMfaChallenge = async (
@@ -45,14 +56,16 @@ const sendSmsMfaChallenge = async (
       x.DeliveryMedium === "SMS",
   );
   if (!smsMfaOption) {
-    throw new UnsupportedError("SMS_MFA without SMS MFAOption");
+    throw new MFAMethodNotFoundError("SMS MFA method not found.");
   }
   const deliveryDestination = attributeValue(
     smsMfaOption.AttributeName,
     user.Attributes,
   );
   if (!deliveryDestination) {
-    throw new UnsupportedError(`SMS_MFA without ${smsMfaOption.AttributeName}`);
+    throw new InvalidUserPoolConfigurationError(
+      `SMS MFA delivery attribute ${smsMfaOption.AttributeName} has no value.`,
+    );
   }
 
   const code = services.otp();
@@ -171,6 +184,16 @@ export const RespondToAuthChallenge =
         throw new UserNotConfirmedException();
       }
 
+      const userHasMfa =
+        (user.MFAOptions ?? []).length > 0 ||
+        (user.UserMFASettingList ?? []).length > 0;
+      if (
+        userPool.options.MfaConfiguration === "ON" ||
+        (userPool.options.MfaConfiguration !== "OFF" && userHasMfa)
+      ) {
+        return verifyMfaChallenge(ctx, user, req, userPool, services);
+      }
+
       if (triggers.enabled("PostAuthentication")) {
         await triggers.postAuthentication(ctx, {
           clientId: req.ClientId,
@@ -201,7 +224,7 @@ export const RespondToAuthChallenge =
       };
     }
 
-    // SMS_MFA and NEW_PASSWORD_REQUIRED require Session
+    // MFA challenges and NEW_PASSWORD_REQUIRED require Session
     if (!req.Session) {
       throw new InvalidParameterError("Missing required parameter Session");
     }
@@ -216,7 +239,16 @@ export const RespondToAuthChallenge =
 
     if (req.ChallengeName === "SELECT_MFA_TYPE") {
       const answer = req.ChallengeResponses.ANSWER;
-      if (answer === "SMS_MFA") {
+      const configuredMethods = new Set(user.UserMFASettingList ?? []);
+      if (
+        (user.MFAOptions ?? []).some(
+          (option) => option.DeliveryMedium === "SMS",
+        )
+      ) {
+        configuredMethods.add("SMS_MFA");
+      }
+
+      if (answer === "SMS_MFA" && configuredMethods.has("SMS_MFA")) {
         return sendSmsMfaChallenge(
           ctx,
           req,
@@ -226,7 +258,11 @@ export const RespondToAuthChallenge =
           (u) => userPool.saveUser(ctx, u),
         );
       }
-      if (answer === "SOFTWARE_TOKEN_MFA") {
+      if (
+        answer === "SOFTWARE_TOKEN_MFA" &&
+        configuredMethods.has("SOFTWARE_TOKEN_MFA") &&
+        user.SoftwareTokenMfaConfiguration?.Verified
+      ) {
         return {
           ChallengeName: "SOFTWARE_TOKEN_MFA",
           ChallengeParameters: {
@@ -241,12 +277,41 @@ export const RespondToAuthChallenge =
           Session: v4(),
         };
       }
-      throw new InvalidParameterError(
-        "SELECT_MFA_TYPE requires ANSWER of SMS_MFA or SOFTWARE_TOKEN_MFA",
+      throw new MFAMethodNotFoundError(
+        "The selected MFA method is not configured for the user.",
       );
     }
 
-    if (req.ChallengeName === "SMS_MFA") {
+    if (req.ChallengeName === "MFA_SETUP") {
+      validateMfaSession(req.Session);
+      if (!userPool.options.SoftwareTokenMfaConfiguration?.Enabled) {
+        throw new SoftwareTokenMFANotFoundError();
+      }
+
+      const session = services.sessions.consume(req.Session);
+      if (
+        !session ||
+        session.purpose !== "MFA_SETUP" ||
+        session.clientId !== req.ClientId ||
+        session.userPoolId !== userPool.options.Id ||
+        session.username !== user.Username
+      ) {
+        throw new NotAuthorizedError("Invalid session for the user.");
+      }
+      if (!user.SoftwareTokenMfaConfiguration?.Verified) {
+        throw new InvalidParameterError(
+          "User has not verified software token MFA",
+        );
+      }
+
+      await userPool.saveUser(ctx, {
+        ...user,
+        UserLastModifiedDate: clock.get(),
+      });
+    } else if (req.ChallengeName === "SMS_MFA") {
+      if (!user.MFACode) {
+        throw new MFAMethodNotFoundError("SMS MFA method not found.");
+      }
       if (user.MFACode !== req.ChallengeResponses.SMS_MFA_CODE) {
         throw new CodeMismatchError();
       }
@@ -257,14 +322,18 @@ export const RespondToAuthChallenge =
         UserLastModifiedDate: clock.get(),
       });
     } else if (req.ChallengeName === "SOFTWARE_TOKEN_MFA") {
+      if (!userPool.options.SoftwareTokenMfaConfiguration?.Enabled) {
+        throw new SoftwareTokenMFANotFoundError();
+      }
+
       const code = req.ChallengeResponses.SOFTWARE_TOKEN_MFA_CODE;
       const secret = user.SoftwareTokenMfaConfiguration?.Secret;
-      if (
-        !code ||
-        !secret ||
-        !user.SoftwareTokenMfaConfiguration?.Verified ||
-        !verifyTotp(secret, code)
-      ) {
+      if (!secret || !user.SoftwareTokenMfaConfiguration?.Verified) {
+        throw new MFAMethodNotFoundError(
+          "Software token MFA method not found.",
+        );
+      }
+      if (!code || !verifyTotp(secret, code)) {
         throw new CodeMismatchError();
       }
       await userPool.saveUser(ctx, {

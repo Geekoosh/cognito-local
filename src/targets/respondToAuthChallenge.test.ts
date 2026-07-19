@@ -10,6 +10,7 @@ import {
 import { ClockFake } from "../__tests__/clockFake";
 import { newMockCognitoService } from "../__tests__/mockCognitoService";
 import { newMockMessages } from "../__tests__/mockMessages";
+import { newMockSessionService } from "../__tests__/mockSessionService";
 import { newMockTokenGenerator } from "../__tests__/mockTokenGenerator";
 import { newMockTriggers } from "../__tests__/mockTriggers";
 import { newMockUserPoolService } from "../__tests__/mockUserPoolService";
@@ -18,9 +19,15 @@ import * as TDB from "../__tests__/testDataBuilder";
 import {
   CodeMismatchError,
   InvalidParameterError,
+  MFAMethodNotFoundError,
   NotAuthorizedError,
 } from "../errors";
-import type { Messages, Triggers, UserPoolService } from "../services";
+import type {
+  Messages,
+  SessionService,
+  Triggers,
+  UserPoolService,
+} from "../services";
 import type { TokenGenerator } from "../services/tokenGenerator";
 import { generateSecret, generate as genTotp } from "../services/totp";
 import {
@@ -37,6 +44,7 @@ describe("RespondToAuthChallenge target", () => {
   let mockUserPoolService: MockedObject<UserPoolService>;
   let mockMessages: MockedObject<Messages>;
   let mockOtp: Mock<() => string>;
+  let mockSessions: MockedObject<SessionService>;
   let clock: ClockFake;
   const userPoolClient = TDB.appClient();
 
@@ -51,9 +59,12 @@ describe("RespondToAuthChallenge target", () => {
     mockTriggers = newMockTriggers();
     mockUserPoolService = newMockUserPoolService({
       Id: userPoolClient.UserPoolId,
+      SoftwareTokenMfaConfiguration: { Enabled: true },
     });
     mockMessages = newMockMessages();
     mockOtp = vi.fn().mockReturnValue("123456");
+    mockSessions = newMockSessionService();
+    mockSessions.create.mockReturnValue("setup-session");
 
     const mockCognitoService = newMockCognitoService(mockUserPoolService);
     mockCognitoService.getAppClient.mockResolvedValue(userPoolClient);
@@ -63,6 +74,7 @@ describe("RespondToAuthChallenge target", () => {
       cognito: mockCognitoService,
       messages: mockMessages,
       otp: mockOtp,
+      sessions: mockSessions,
       tokenGenerator: mockTokenGenerator,
       triggers: mockTriggers,
     });
@@ -123,6 +135,142 @@ describe("RespondToAuthChallenge target", () => {
     ).rejects.toEqual(
       new InvalidParameterError("Missing required parameter Session"),
     );
+  });
+
+  describe("ChallengeName=MFA_SETUP", () => {
+    const sessionFor = (username: string) => ({
+      clientId: userPoolClient.ClientId,
+      expiresAt: Date.now() + 60_000,
+      purpose: "MFA_SETUP" as const,
+      userPoolId: userPoolClient.UserPoolId,
+      username,
+    });
+
+    it("consumes the session and issues tokens after TOTP verification", async () => {
+      const user = TDB.user({
+        SoftwareTokenMfaConfiguration: {
+          Secret: generateSecret(),
+          Verified: true,
+        },
+        UserMFASettingList: ["SOFTWARE_TOKEN_MFA"],
+      });
+      mockUserPoolService.getUserByUsername.mockResolvedValue(user);
+      mockUserPoolService.listUserGroupMembership.mockResolvedValue([]);
+      mockSessions.consume.mockReturnValue(sessionFor(user.Username));
+
+      const result = await respondToAuthChallenge(TestContext, {
+        ClientId: userPoolClient.ClientId,
+        ChallengeName: "MFA_SETUP",
+        ChallengeResponses: { USERNAME: user.Username },
+        Session: "verified-mfa-session-token",
+      });
+
+      expect(mockSessions.consume).toHaveBeenCalledWith(
+        "verified-mfa-session-token",
+      );
+      expect(mockUserPoolService.saveUser).toHaveBeenCalledWith(TestContext, {
+        ...user,
+        UserLastModifiedDate: currentDate,
+      });
+      expect(result.AuthenticationResult?.AccessToken).toEqual("access");
+    });
+
+    it("rejects replaying a consumed session", async () => {
+      const user = TDB.user({
+        SoftwareTokenMfaConfiguration: {
+          Secret: generateSecret(),
+          Verified: true,
+        },
+      });
+      mockUserPoolService.getUserByUsername.mockResolvedValue(user);
+      mockUserPoolService.listUserGroupMembership.mockResolvedValue([]);
+      mockSessions.consume
+        .mockReturnValueOnce(sessionFor(user.Username))
+        .mockReturnValueOnce(null);
+
+      const request = {
+        ClientId: userPoolClient.ClientId,
+        ChallengeName: "MFA_SETUP" as const,
+        ChallengeResponses: { USERNAME: user.Username },
+        Session: "one-time-mfa-session-token",
+      };
+
+      await respondToAuthChallenge(TestContext, request);
+      await expect(
+        respondToAuthChallenge(TestContext, request),
+      ).rejects.toEqual(
+        new NotAuthorizedError("Invalid session for the user."),
+      );
+    });
+
+    it("rejects an unverified software token", async () => {
+      const user = TDB.user({
+        SoftwareTokenMfaConfiguration: {
+          Secret: generateSecret(),
+          Verified: false,
+        },
+      });
+      mockUserPoolService.getUserByUsername.mockResolvedValue(user);
+      mockSessions.consume.mockReturnValue(sessionFor(user.Username));
+
+      await expect(
+        respondToAuthChallenge(TestContext, {
+          ClientId: userPoolClient.ClientId,
+          ChallengeName: "MFA_SETUP",
+          ChallengeResponses: { USERNAME: user.Username },
+          Session: "unverified-mfa-session-token",
+        }),
+      ).rejects.toEqual(
+        new InvalidParameterError("User has not verified software token MFA"),
+      );
+    });
+
+    it("rejects a session bound to a different user", async () => {
+      const user = TDB.user({
+        SoftwareTokenMfaConfiguration: {
+          Secret: generateSecret(),
+          Verified: true,
+        },
+      });
+      mockUserPoolService.getUserByUsername.mockResolvedValue(user);
+      mockSessions.consume.mockReturnValue(sessionFor("another-user"));
+
+      await expect(
+        respondToAuthChallenge(TestContext, {
+          ClientId: userPoolClient.ClientId,
+          ChallengeName: "MFA_SETUP",
+          ChallengeResponses: { USERNAME: user.Username },
+          Session: "mismatched-mfa-session-token",
+        }),
+      ).rejects.toEqual(
+        new NotAuthorizedError("Invalid session for the user."),
+      );
+    });
+
+    it("rejects a session bound to a different client", async () => {
+      const user = TDB.user({
+        SoftwareTokenMfaConfiguration: {
+          Secret: generateSecret(),
+          Verified: true,
+        },
+      });
+      mockUserPoolService.getUserByUsername.mockResolvedValue(user);
+      mockSessions.consume.mockReturnValue({
+        ...sessionFor(user.Username),
+        clientId: "another-client",
+      });
+
+      await expect(
+        respondToAuthChallenge(TestContext, {
+          ClientId: userPoolClient.ClientId,
+          ChallengeName: "MFA_SETUP",
+          ChallengeResponses: { USERNAME: user.Username },
+          Session: "mismatched-mfa-session-token",
+        }),
+      ).rejects.toEqual(
+        new NotAuthorizedError("Invalid session for the user."),
+      );
+    });
   });
 
   describe("ChallengeName=SMS_MFA", () => {
@@ -476,7 +624,11 @@ describe("RespondToAuthChallenge target", () => {
             ANSWER: "BOGUS",
           },
         }),
-      ).rejects.toBeInstanceOf(InvalidParameterError);
+      ).rejects.toEqual(
+        new MFAMethodNotFoundError(
+          "The selected MFA method is not configured for the user.",
+        ),
+      );
     });
   });
 });

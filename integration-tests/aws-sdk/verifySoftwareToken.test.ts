@@ -1,6 +1,19 @@
+import type AWS from "aws-sdk";
 import { describe, expect, it } from "vitest";
 import { generate } from "../../src/services/totp";
 import { withCognitoSdk } from "./setup";
+
+const enableTotp = async (
+  client: AWS.CognitoIdentityServiceProvider,
+  userPoolId: string,
+) =>
+  client
+    .setUserPoolMfaConfig({
+      MfaConfiguration: "OPTIONAL",
+      SoftwareTokenMfaConfiguration: { Enabled: true },
+      UserPoolId: userPoolId,
+    })
+    .promise();
 
 describe(
   "CognitoIdentityServiceProvider.verifySoftwareToken",
@@ -10,6 +23,7 @@ describe(
 
       const pool = await client.createUserPool({ PoolName: "test" }).promise();
       const userPoolId = pool.UserPool?.Id!;
+      await enableTotp(client, userPoolId);
       const upc = await client
         .createUserPoolClient({ UserPoolId: userPoolId, ClientName: "test" })
         .promise();
@@ -45,6 +59,19 @@ describe(
         .associateSoftwareToken({ AccessToken: accessToken })
         .promise();
 
+      await expect(
+        client
+          .verifySoftwareToken({
+            AccessToken: accessToken,
+            Session: "01234567890123456789",
+            UserCode: generate(associate.SecretCode!),
+          })
+          .promise(),
+      ).rejects.toMatchObject({
+        code: "InvalidParameterException",
+        statusCode: 400,
+      });
+
       const verifyOk = await client
         .verifySoftwareToken({
           AccessToken: accessToken,
@@ -72,6 +99,7 @@ describe(
       const client = Cognito();
       const pool = await client.createUserPool({ PoolName: "test" }).promise();
       const userPoolId = pool.UserPool?.Id!;
+      await enableTotp(client, userPoolId);
       const upc = await client
         .createUserPoolClient({ UserPoolId: userPoolId, ClientName: "test" })
         .promise();
@@ -120,6 +148,7 @@ describe(
           .createUserPool({ PoolName: "test" })
           .promise();
         const userPoolId = pool.UserPool?.Id!;
+        await enableTotp(client, userPoolId);
         const upc = await client
           .createUserPoolClient({ UserPoolId: userPoolId, ClientName: "test" })
           .promise();
@@ -160,7 +189,7 @@ describe(
             .verifySoftwareToken({ AccessToken: accessToken, UserCode: code })
             .promise(),
         ).rejects.toMatchObject({
-          code: "CodeMismatchException",
+          code: "InvalidParameterException",
           statusCode: 400,
         });
       },
