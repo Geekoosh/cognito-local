@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, type MockedObject } from "vitest";
 import { ClockFake } from "../__tests__/clockFake";
 import { newMockCognitoService } from "../__tests__/mockCognitoService";
 import { newMockMessages } from "../__tests__/mockMessages";
+import { newMockSessionService } from "../__tests__/mockSessionService";
 import { newMockTokenGenerator } from "../__tests__/mockTokenGenerator";
 import { newMockTriggers } from "../__tests__/mockTriggers";
 import { newMockUserPoolService } from "../__tests__/mockUserPoolService";
@@ -18,7 +19,7 @@ import { TestContext } from "../__tests__/testContext";
 import * as TDB from "../__tests__/testDataBuilder";
 import { InvalidParameterError, NotAuthorizedError } from "../errors";
 import { DefaultConfig } from "../server/config";
-import type { UserPoolService } from "../services";
+import type { SessionService, UserPoolService } from "../services";
 import type { TokenGenerator } from "../services/tokenGenerator";
 import type { User } from "../services/userPoolService";
 import { InitiateAuth, type InitiateAuthTarget } from "./initiateAuth";
@@ -61,6 +62,7 @@ describe("USER_SRP_AUTH end-to-end", () => {
   let initiateAuth: InitiateAuthTarget;
   let respondToAuthChallenge: RespondToAuthChallengeTarget;
   let mockUserPoolService: MockedObject<UserPoolService>;
+  let mockSessions: MockedObject<SessionService>;
   let mockTokenGenerator: MockedObject<TokenGenerator>;
   let user: User;
   const userPoolClient = TDB.appClient({ UserPoolId: POOL_ID });
@@ -79,6 +81,8 @@ describe("USER_SRP_AUTH end-to-end", () => {
       RefreshToken: "refresh",
       ExpiresIn: 3600,
     });
+    mockSessions = newMockSessionService();
+    mockSessions.create.mockReturnValue("mfa-setup-session");
 
     const mockCognitoService = newMockCognitoService(mockUserPoolService);
     mockCognitoService.getAppClient.mockResolvedValue(userPoolClient);
@@ -88,6 +92,7 @@ describe("USER_SRP_AUTH end-to-end", () => {
       cognito: mockCognitoService,
       messages: newMockMessages(),
       otp: () => "123456",
+      sessions: mockSessions,
       triggers: newMockTriggers(),
       tokenGenerator: mockTokenGenerator,
     });
@@ -96,6 +101,7 @@ describe("USER_SRP_AUTH end-to-end", () => {
       cognito: mockCognitoService,
       messages: newMockMessages(),
       otp: () => "123456",
+      sessions: mockSessions,
       triggers: newMockTriggers(),
       tokenGenerator: mockTokenGenerator,
     });
@@ -157,6 +163,42 @@ describe("USER_SRP_AUTH end-to-end", () => {
           }),
         ),
       ).rejects.toBeInstanceOf(NotAuthorizedError);
+    });
+
+    it("continues into forced MFA enrollment after password verification", async () => {
+      mockUserPoolService.options.MfaConfiguration = "ON";
+      mockUserPoolService.options.SoftwareTokenMfaConfiguration = {
+        Enabled: true,
+      };
+      const session = createSrpSession(user.Username, PASSWORD, POOL_ID, false);
+
+      const initResp = await initiateAuth(
+        TestContext,
+        wrapInitiateAuth(session, {
+          ClientId: userPoolClient.ClientId,
+          AuthFlow: "USER_SRP_AUTH",
+          AuthParameters: { USERNAME: user.Username },
+        }),
+      );
+      const signed = signSrpSession(session, initResp);
+      const response = await respondToAuthChallenge(
+        TestContext,
+        wrapAuthChallenge(signed, {
+          ClientId: userPoolClient.ClientId,
+          ChallengeName: "PASSWORD_VERIFIER",
+          ChallengeResponses: { USERNAME: user.Username },
+        }),
+      );
+
+      expect(response).toEqual({
+        ChallengeName: "MFA_SETUP",
+        ChallengeParameters: {
+          USER_ID_FOR_SRP: user.Username,
+          MFAS_CAN_SETUP: JSON.stringify(["SOFTWARE_TOKEN_MFA"]),
+        },
+        Session: "mfa-setup-session",
+      });
+      expect(mockTokenGenerator.generate).not.toHaveBeenCalled();
     });
   });
 
