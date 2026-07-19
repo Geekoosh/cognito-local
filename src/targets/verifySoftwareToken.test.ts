@@ -10,6 +10,7 @@ import {
   CodeMismatchError,
   InvalidParameterError,
   NotAuthorizedError,
+  SoftwareTokenMFANotFoundError,
 } from "../errors";
 import PrivateKey from "../keys/cognitoLocal.private.json";
 import type { SessionService, UserPoolService } from "../services";
@@ -46,12 +47,44 @@ describe("VerifySoftwareToken target", () => {
   let mockUserPoolService: MockedObject<UserPoolService>;
 
   beforeEach(() => {
-    mockUserPoolService = newMockUserPoolService();
+    mockUserPoolService = newMockUserPoolService({
+      Id: "pool",
+      SoftwareTokenMfaConfiguration: { Enabled: true },
+    });
     mockSessions = newMockSessionService();
     verifySoftwareToken = VerifySoftwareToken({
       cognito: newMockCognitoService(mockUserPoolService),
       sessions: mockSessions,
     });
+  });
+
+  it.each(["1234", "abcdef", "12345a", "1234567"])(
+    "rejects malformed UserCode %j",
+    async (userCode) => {
+      await expect(
+        verifySoftwareToken(TestContext, {
+          AccessToken: signAccessToken("user"),
+          UserCode: userCode,
+        }),
+      ).rejects.toEqual(
+        new InvalidParameterError("UserCode must be a 6-digit number."),
+      );
+      expect(mockUserPoolService.getUserByUsername).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects when both AccessToken and Session are provided", async () => {
+    await expect(
+      verifySoftwareToken(TestContext, {
+        AccessToken: signAccessToken("user"),
+        Session: "valid-session-token-123",
+        UserCode: "123456",
+      }),
+    ).rejects.toEqual(
+      new InvalidParameterError(
+        "Exactly one of AccessToken or Session must be provided",
+      ),
+    );
   });
 
   it("verifies a correct code and marks the secret verified", async () => {
@@ -126,7 +159,7 @@ describe("VerifySoftwareToken target", () => {
     mockSessions.rotate.mockReturnValue("rotated-session");
 
     const result = await verifySoftwareToken(TestContext, {
-      Session: "associated-session",
+      Session: "associated-session-token-123",
       UserCode: generate(secret),
     });
 
@@ -134,7 +167,9 @@ describe("VerifySoftwareToken target", () => {
       Status: "SUCCESS",
       Session: "rotated-session",
     });
-    expect(mockSessions.rotate).toHaveBeenCalledWith("associated-session");
+    expect(mockSessions.rotate).toHaveBeenCalledWith(
+      "associated-session-token-123",
+    );
     expect(mockUserPoolService.saveUser).toHaveBeenCalledWith(
       TestContext,
       expect.objectContaining({
@@ -153,10 +188,27 @@ describe("VerifySoftwareToken target", () => {
 
     await expect(
       verifySoftwareToken(TestContext, {
-        Session: "invalid",
+        Session: "invalid-session-token-123",
         UserCode: "123456",
       }),
     ).rejects.toEqual(new NotAuthorizedError("Invalid session for the user."));
+    expect(mockUserPoolService.saveUser).not.toHaveBeenCalled();
+  });
+
+  it("rejects verification when TOTP is disabled for the pool", async () => {
+    const secret = generateSecret();
+    const user = TDB.user({
+      SoftwareTokenMfaConfiguration: { Secret: secret, Verified: false },
+    });
+    mockUserPoolService.options.SoftwareTokenMfaConfiguration = undefined;
+    mockUserPoolService.getUserByUsername.mockResolvedValue(user);
+
+    await expect(
+      verifySoftwareToken(TestContext, {
+        AccessToken: signAccessToken(user.Username),
+        UserCode: generate(secret),
+      }),
+    ).rejects.toEqual(new SoftwareTokenMFANotFoundError());
     expect(mockUserPoolService.saveUser).not.toHaveBeenCalled();
   });
 });

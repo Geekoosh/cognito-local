@@ -9,6 +9,13 @@ describe(
 
       const pool = await client.createUserPool({ PoolName: "test" }).promise();
       const userPoolId = pool.UserPool?.Id!;
+      await client
+        .setUserPoolMfaConfig({
+          MfaConfiguration: "OPTIONAL",
+          SoftwareTokenMfaConfiguration: { Enabled: true },
+          UserPoolId: userPoolId,
+        })
+        .promise();
 
       const upc = await client
         .createUserPoolClient({
@@ -51,6 +58,35 @@ describe(
         .promise();
 
       expect(response.SecretCode).toMatch(/^[A-Z2-7]+=*$/);
+
+      await expect(
+        client
+          .associateSoftwareToken({
+            AccessToken: auth.AuthenticationResult?.AccessToken!,
+            Session: "01234567890123456789",
+          })
+          .promise(),
+      ).rejects.toMatchObject({
+        code: "InvalidParameterException",
+        statusCode: 400,
+      });
+
+      await client
+        .setUserPoolMfaConfig({
+          SoftwareTokenMfaConfiguration: { Enabled: false },
+          UserPoolId: userPoolId,
+        })
+        .promise();
+      await expect(
+        client
+          .associateSoftwareToken({
+            AccessToken: auth.AuthenticationResult?.AccessToken!,
+          })
+          .promise(),
+      ).rejects.toMatchObject({
+        code: "SoftwareTokenMFANotFoundException",
+        statusCode: 400,
+      });
     });
 
     it("returns InvalidParameterException when called with neither AccessToken nor Session", async () => {

@@ -9,7 +9,7 @@ import * as TDB from "../__tests__/testDataBuilder";
 import {
   InvalidParameterError,
   NotAuthorizedError,
-  UnsupportedError,
+  SoftwareTokenMFANotFoundError,
 } from "../errors";
 import PrivateKey from "../keys/cognitoLocal.private.json";
 import type { SessionService, UserPoolService } from "../services";
@@ -62,6 +62,26 @@ describe("AssociateSoftwareToken target", () => {
     ).rejects.toBeInstanceOf(InvalidParameterError);
   });
 
+  it("rejects when both AccessToken and Session are provided", async () => {
+    await expect(
+      associateSoftwareToken(TestContext, {
+        AccessToken: signAccessToken("user"),
+        Session: "valid-session-token-123",
+      }),
+    ).rejects.toEqual(
+      new InvalidParameterError(
+        "Exactly one of AccessToken or Session must be provided",
+      ),
+    );
+  });
+
+  it("rejects a session that violates Cognito's length constraints", async () => {
+    await expect(
+      associateSoftwareToken(TestContext, { Session: "short" }),
+    ).rejects.toEqual(new InvalidParameterError("Invalid session."));
+    expect(mockSessions.get).not.toHaveBeenCalled();
+  });
+
   it("generates and stores a TOTP secret for the authed user", async () => {
     const user = TDB.user();
     mockUserPoolService.getUserByUsername.mockResolvedValue(user);
@@ -97,21 +117,25 @@ describe("AssociateSoftwareToken target", () => {
     mockSessions.rotate.mockReturnValue("rotated-session");
 
     const result = await associateSoftwareToken(TestContext, {
-      Session: "initial-session",
+      Session: "initial-session-token-123",
     });
 
     expect(result).toEqual({
       SecretCode: expect.stringMatching(/^[A-Z2-7]+=*$/),
       Session: "rotated-session",
     });
-    expect(mockSessions.rotate).toHaveBeenCalledWith("initial-session");
+    expect(mockSessions.rotate).toHaveBeenCalledWith(
+      "initial-session-token-123",
+    );
   });
 
   it("rejects an invalid MFA_SETUP session", async () => {
     mockSessions.get.mockReturnValue(null);
 
     await expect(
-      associateSoftwareToken(TestContext, { Session: "invalid" }),
+      associateSoftwareToken(TestContext, {
+        Session: "invalid-session-token-123",
+      }),
     ).rejects.toEqual(new NotAuthorizedError("Invalid session for the user."));
     expect(mockUserPoolService.saveUser).not.toHaveBeenCalled();
   });
@@ -128,12 +152,23 @@ describe("AssociateSoftwareToken target", () => {
     });
 
     await expect(
-      associateSoftwareToken(TestContext, { Session: "sms-only-session" }),
-    ).rejects.toEqual(
-      new UnsupportedError(
-        "MFA_SETUP supports only SOFTWARE_TOKEN_MFA enrollment",
-      ),
-    );
+      associateSoftwareToken(TestContext, {
+        Session: "sms-only-session-token-123",
+      }),
+    ).rejects.toEqual(new SoftwareTokenMFANotFoundError());
+    expect(mockUserPoolService.saveUser).not.toHaveBeenCalled();
+  });
+
+  it("rejects access-token enrollment when TOTP is disabled for the pool", async () => {
+    const user = TDB.user();
+    mockUserPoolService.options.SoftwareTokenMfaConfiguration = undefined;
+    mockUserPoolService.getUserByUsername.mockResolvedValue(user);
+
+    await expect(
+      associateSoftwareToken(TestContext, {
+        AccessToken: signAccessToken(user.Username),
+      }),
+    ).rejects.toEqual(new SoftwareTokenMFANotFoundError());
     expect(mockUserPoolService.saveUser).not.toHaveBeenCalled();
   });
 });

@@ -3,14 +3,11 @@ import type {
   AssociateSoftwareTokenResponse,
 } from "aws-sdk/clients/cognitoidentityserviceprovider";
 import jwt from "jsonwebtoken";
-import {
-  InvalidParameterError,
-  NotAuthorizedError,
-  UnsupportedError,
-} from "../errors";
+import { NotAuthorizedError, SoftwareTokenMFANotFoundError } from "../errors";
 import type { Services } from "../services";
 import type { Token } from "../services/tokenGenerator";
 import { generateSecret } from "../services/totp";
+import { validateMfaAuthorization } from "./mfaValidation";
 import type { Target } from "./Target";
 
 export type AssociateSoftwareTokenTarget = Target<
@@ -26,11 +23,7 @@ export const AssociateSoftwareToken =
     sessions,
   }: AssociateSoftwareTokenServices): AssociateSoftwareTokenTarget =>
   async (ctx, req) => {
-    if (!req.AccessToken && !req.Session) {
-      throw new InvalidParameterError(
-        "Either AccessToken or Session is required",
-      );
-    }
+    validateMfaAuthorization(req.AccessToken, req.Session);
 
     if (!req.AccessToken) {
       const session = sessions.get(req.Session as string);
@@ -40,9 +33,7 @@ export const AssociateSoftwareToken =
 
       const userPool = await cognito.getUserPool(ctx, session.userPoolId);
       if (!userPool.options.SoftwareTokenMfaConfiguration?.Enabled) {
-        throw new UnsupportedError(
-          "MFA_SETUP supports only SOFTWARE_TOKEN_MFA enrollment",
-        );
+        throw new SoftwareTokenMFANotFoundError();
       }
 
       const user = await userPool.getUserByUsername(ctx, session.username);
@@ -72,13 +63,17 @@ export const AssociateSoftwareToken =
 
     const decoded = jwt.decode(req.AccessToken) as Token | null;
     if (!decoded) {
-      throw new InvalidParameterError();
+      throw new NotAuthorizedError("Invalid Access Token");
     }
 
     const userPool = await cognito.getUserPoolForClientId(
       ctx,
       decoded.client_id,
     );
+    if (!userPool.options.SoftwareTokenMfaConfiguration?.Enabled) {
+      throw new SoftwareTokenMFANotFoundError();
+    }
+
     const user = await userPool.getUserByUsername(ctx, decoded.sub);
     if (!user) {
       throw new NotAuthorizedError();

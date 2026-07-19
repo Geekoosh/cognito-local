@@ -20,6 +20,7 @@ import * as TDB from "../__tests__/testDataBuilder";
 import {
   InvalidParameterError,
   InvalidPasswordError,
+  InvalidUserPoolConfigurationError,
   NotAuthorizedError,
   PasswordResetRequiredError,
 } from "../errors";
@@ -270,7 +271,7 @@ describe("InitiateAuth target", () => {
             mockUserPoolService.getUserByUsername.mockResolvedValue(user);
           });
 
-          it("throws an exception", async () => {
+          it("rejects an invalid pool with required MFA but no methods", async () => {
             await expect(
               initiateAuth(TestContext, {
                 ClientId: userPoolClient.ClientId,
@@ -280,7 +281,11 @@ describe("InitiateAuth target", () => {
                   PASSWORD: user.Password,
                 },
               }),
-            ).rejects.toBeInstanceOf(NotAuthorizedError);
+            ).rejects.toEqual(
+              new InvalidUserPoolConfigurationError(
+                "User pool does not have any MFA methods configured.",
+              ),
+            );
           });
 
           it("starts MFA_SETUP when software token MFA is available", async () => {

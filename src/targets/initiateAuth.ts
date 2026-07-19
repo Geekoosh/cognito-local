@@ -8,6 +8,7 @@ import { v4 } from "uuid";
 import {
   InvalidParameterError,
   InvalidPasswordError,
+  InvalidUserPoolConfigurationError,
   NotAuthorizedError,
   PasswordResetRequiredError,
   UnsupportedError,
@@ -61,7 +62,9 @@ const smsMfaChallenge = async (
       x.DeliveryMedium === "SMS",
   );
   if (!smsMfaOption) {
-    throw new UnsupportedError("SMS_MFA without SMS MFAOption");
+    throw new InvalidUserPoolConfigurationError(
+      "SMS MFA is enabled for the user but no SMS delivery attribute is configured.",
+    );
   }
 
   const deliveryDestination = attributeValue(
@@ -69,7 +72,9 @@ const smsMfaChallenge = async (
     user.Attributes,
   );
   if (!deliveryDestination) {
-    throw new UnsupportedError(`SMS_MFA without ${smsMfaOption.AttributeName}`);
+    throw new InvalidUserPoolConfigurationError(
+      `SMS MFA delivery attribute ${smsMfaOption.AttributeName} has no value.`,
+    );
   }
 
   const code = services.otp();
@@ -156,7 +161,9 @@ export const verifyMfaChallenge = async (
       methodsToSetup.push("SMS_MFA");
     }
     if (methodsToSetup.length === 0) {
-      throw new NotAuthorizedError();
+      throw new InvalidUserPoolConfigurationError(
+        "User pool does not have any MFA methods configured.",
+      );
     }
 
     return {

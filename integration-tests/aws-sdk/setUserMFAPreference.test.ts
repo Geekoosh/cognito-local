@@ -10,6 +10,13 @@ describe(
 
       const pool = await client.createUserPool({ PoolName: "test" }).promise();
       const userPoolId = pool.UserPool?.Id!;
+      await client
+        .setUserPoolMfaConfig({
+          MfaConfiguration: "OPTIONAL",
+          SoftwareTokenMfaConfiguration: { Enabled: true },
+          UserPoolId: userPoolId,
+        })
+        .promise();
       const upc = await client
         .createUserPoolClient({ UserPoolId: userPoolId, ClientName: "test" })
         .promise();
@@ -71,6 +78,13 @@ describe(
 
       const pool = await client.createUserPool({ PoolName: "test" }).promise();
       const userPoolId = pool.UserPool?.Id!;
+      await client
+        .setUserPoolMfaConfig({
+          MfaConfiguration: "OPTIONAL",
+          SoftwareTokenMfaConfiguration: { Enabled: true },
+          UserPoolId: userPoolId,
+        })
+        .promise();
       const upc = await client
         .createUserPoolClient({ UserPoolId: userPoolId, ClientName: "test" })
         .promise();

@@ -217,7 +217,7 @@ describe(
           })
           .promise(),
       ).rejects.toMatchObject({
-        code: "InvalidParameterException",
+        code: "MFAMethodNotFoundException",
       });
     });
   }),

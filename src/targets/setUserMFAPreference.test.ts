@@ -5,7 +5,7 @@ import { newMockCognitoService } from "../__tests__/mockCognitoService";
 import { newMockUserPoolService } from "../__tests__/mockUserPoolService";
 import { TestContext } from "../__tests__/testContext";
 import * as TDB from "../__tests__/testDataBuilder";
-import { InvalidParameterError } from "../errors";
+import { InvalidParameterError, OperationNotEnabledError } from "../errors";
 import PrivateKey from "../keys/cognitoLocal.private.json";
 import type { UserPoolService } from "../services";
 import {
@@ -39,7 +39,14 @@ describe("SetUserMFAPreference target", () => {
   let mockUserPoolService: MockedObject<UserPoolService>;
 
   beforeEach(() => {
-    mockUserPoolService = newMockUserPoolService();
+    mockUserPoolService = newMockUserPoolService({
+      Id: "pool",
+      MfaConfiguration: "OPTIONAL",
+      SmsConfiguration: {
+        SnsCallerArn: "arn:aws:iam::000000000000:role/test",
+      },
+      SoftwareTokenMfaConfiguration: { Enabled: true },
+    });
     setUserMFAPreference = SetUserMFAPreference({
       cognito: newMockCognitoService(mockUserPoolService),
     });
@@ -117,6 +124,84 @@ describe("SetUserMFAPreference target", () => {
         UserMFASettingList: ["SOFTWARE_TOKEN_MFA"],
         PreferredMfaSetting: "SOFTWARE_TOKEN_MFA",
       }),
+    );
+  });
+
+  it("rejects multiple preferred MFA methods", async () => {
+    const user = TDB.user({
+      SoftwareTokenMfaConfiguration: { Secret: "s", Verified: true },
+      UserMFASettingList: ["SMS_MFA", "SOFTWARE_TOKEN_MFA"],
+    });
+    mockUserPoolService.getUserByUsername.mockResolvedValue(user);
+
+    await expect(
+      setUserMFAPreference(TestContext, {
+        AccessToken: signAccessToken(user.Username),
+        SMSMfaSettings: { PreferredMfa: true },
+        SoftwareTokenMfaSettings: { PreferredMfa: true },
+      }),
+    ).rejects.toEqual(
+      new InvalidParameterError("Only one MFA method can be set as preferred."),
+    );
+  });
+
+  it("preserves an existing preference when PreferredMfa is omitted", async () => {
+    const user = TDB.user({
+      PreferredMfaSetting: "SOFTWARE_TOKEN_MFA",
+      SoftwareTokenMfaConfiguration: { Secret: "s", Verified: true },
+      UserMFASettingList: ["SOFTWARE_TOKEN_MFA"],
+    });
+    mockUserPoolService.getUserByUsername.mockResolvedValue(user);
+
+    await setUserMFAPreference(TestContext, {
+      AccessToken: signAccessToken(user.Username),
+      SoftwareTokenMfaSettings: { Enabled: true },
+    });
+
+    expect(mockUserPoolService.saveUser).toHaveBeenCalledWith(
+      TestContext,
+      expect.objectContaining({
+        PreferredMfaSetting: "SOFTWARE_TOKEN_MFA",
+      }),
+    );
+  });
+
+  it("rejects disabling an enrolled method when MFA is required", async () => {
+    const user = TDB.user({
+      SoftwareTokenMfaConfiguration: { Secret: "s", Verified: true },
+      UserMFASettingList: ["SOFTWARE_TOKEN_MFA"],
+    });
+    mockUserPoolService.options.MfaConfiguration = "ON";
+    mockUserPoolService.getUserByUsername.mockResolvedValue(user);
+
+    await expect(
+      setUserMFAPreference(TestContext, {
+        AccessToken: signAccessToken(user.Username),
+        SoftwareTokenMfaSettings: { Enabled: false },
+      }),
+    ).rejects.toEqual(
+      new InvalidParameterError(
+        "MFA methods cannot be disabled when MFA is required.",
+      ),
+    );
+  });
+
+  it("rejects enabling a method that is disabled for the pool", async () => {
+    const user = TDB.user({
+      SoftwareTokenMfaConfiguration: { Secret: "s", Verified: true },
+    });
+    mockUserPoolService.options.SoftwareTokenMfaConfiguration = undefined;
+    mockUserPoolService.getUserByUsername.mockResolvedValue(user);
+
+    await expect(
+      setUserMFAPreference(TestContext, {
+        AccessToken: signAccessToken(user.Username),
+        SoftwareTokenMfaSettings: { Enabled: true },
+      }),
+    ).rejects.toEqual(
+      new OperationNotEnabledError(
+        "Software token MFA is not enabled for the user pool.",
+      ),
     );
   });
 });

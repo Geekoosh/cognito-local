@@ -10,20 +10,10 @@ import { ClockFake } from "../../src/__tests__/clockFake";
 import { generate } from "../../src/services/totp";
 import { withCognitoSdk } from "./setup";
 
-const createRequiredMfaUser = async (
+const createUserInPool = async (
   client: AWS.CognitoIdentityServiceProvider,
+  userPoolId: string,
 ) => {
-  const pool = await client
-    .createUserPool({ MfaConfiguration: "ON", PoolName: "test" })
-    .promise();
-  const userPoolId = pool.UserPool?.Id as string;
-  await client
-    .setUserPoolMfaConfig({
-      MfaConfiguration: "ON",
-      SoftwareTokenMfaConfiguration: { Enabled: true },
-      UserPoolId: userPoolId,
-    })
-    .promise();
   const appClient = await client
     .createUserPoolClient({ ClientName: "test", UserPoolId: userPoolId })
     .promise();
@@ -46,6 +36,25 @@ const createRequiredMfaUser = async (
       UserPoolId: userPoolId,
     })
     .promise();
+
+  return clientId;
+};
+
+const createRequiredMfaUser = async (
+  client: AWS.CognitoIdentityServiceProvider,
+) => {
+  const pool = await client
+    .createUserPool({ MfaConfiguration: "ON", PoolName: "test" })
+    .promise();
+  const userPoolId = pool.UserPool?.Id as string;
+  await client
+    .setUserPoolMfaConfig({
+      MfaConfiguration: "ON",
+      SoftwareTokenMfaConfiguration: { Enabled: true },
+      UserPoolId: userPoolId,
+    })
+    .promise();
+  const clientId = await createUserInPool(client, userPoolId);
 
   return { clientId, userPoolId };
 };
@@ -75,6 +84,13 @@ describe(
           USER_ID_FOR_SRP: "user",
         },
         Session: expect.any(String),
+      });
+
+      await expect(
+        client.associateSoftwareToken({ Session: "short" }).promise(),
+      ).rejects.toMatchObject({
+        code: "InvalidParameterException",
+        statusCode: 400,
       });
 
       const associated = await client
@@ -158,14 +174,20 @@ describe(
         .promise();
       expect(authenticated.AuthenticationResult?.AccessToken).toBeDefined();
 
-      await client
-        .adminSetUserMFAPreference({
-          SoftwareTokenMfaSettings: { Enabled: false },
-          Username: "user",
-          UserPoolId: userPoolId,
-        })
-        .promise();
-      const disabledLogin = await client
+      await expect(
+        client
+          .adminSetUserMFAPreference({
+            SoftwareTokenMfaSettings: { Enabled: false },
+            Username: "user",
+            UserPoolId: userPoolId,
+          })
+          .promise(),
+      ).rejects.toMatchObject({
+        code: "InvalidParameterException",
+        message: "MFA methods cannot be disabled when MFA is required.",
+      });
+
+      const requiredMfaLogin = await client
         .initiateAuth({
           AuthFlow: "USER_PASSWORD_AUTH",
           AuthParameters: {
@@ -175,7 +197,7 @@ describe(
           ClientId: clientId,
         })
         .promise();
-      expect(disabledLogin.ChallengeName).toEqual("MFA_SETUP");
+      expect(requiredMfaLogin.ChallengeName).toEqual("SOFTWARE_TOKEN_MFA");
 
       await client
         .adminSetUserMFAPreference({
@@ -195,6 +217,75 @@ describe(
         })
         .promise();
       expect(reenabledLogin.ChallengeName).toEqual("SOFTWARE_TOKEN_MFA");
+    });
+
+    it("maps invalid required-MFA pool configuration to InvalidUserPoolConfigurationException", async () => {
+      const client = Cognito();
+      const pool = await client
+        .createUserPool({ MfaConfiguration: "ON", PoolName: "test" })
+        .promise();
+      const userPoolId = pool.UserPool?.Id as string;
+      const clientId = await createUserInPool(client, userPoolId);
+
+      await expect(
+        client
+          .initiateAuth({
+            AuthFlow: "USER_PASSWORD_AUTH",
+            AuthParameters: {
+              PASSWORD: "Password1!",
+              USERNAME: "user",
+            },
+            ClientId: clientId,
+          })
+          .promise(),
+      ).rejects.toMatchObject({
+        code: "InvalidUserPoolConfigurationException",
+        statusCode: 400,
+      });
+    });
+
+    it("maps TOTP enrollment in an SMS-only pool to SoftwareTokenMFANotFoundException", async () => {
+      const client = Cognito();
+      const pool = await client
+        .createUserPool({ MfaConfiguration: "ON", PoolName: "test" })
+        .promise();
+      const userPoolId = pool.UserPool?.Id as string;
+      await client
+        .setUserPoolMfaConfig({
+          MfaConfiguration: "ON",
+          SmsMfaConfiguration: {
+            SmsConfiguration: {
+              SnsCallerArn: "arn:aws:iam::000000000000:role/test",
+            },
+          },
+          UserPoolId: userPoolId,
+        })
+        .promise();
+      const clientId = await createUserInPool(client, userPoolId);
+
+      const challenge = await client
+        .initiateAuth({
+          AuthFlow: "USER_PASSWORD_AUTH",
+          AuthParameters: {
+            PASSWORD: "Password1!",
+            USERNAME: "user",
+          },
+          ClientId: clientId,
+        })
+        .promise();
+      expect(challenge).toMatchObject({
+        ChallengeName: "MFA_SETUP",
+        ChallengeParameters: {
+          MFAS_CAN_SETUP: JSON.stringify(["SMS_MFA"]),
+        },
+      });
+
+      await expect(
+        client.associateSoftwareToken({ Session: challenge.Session }).promise(),
+      ).rejects.toMatchObject({
+        code: "SoftwareTokenMFANotFoundException",
+        statusCode: 400,
+      });
     });
 
     it("continues from PASSWORD_VERIFIER into forced enrollment", async () => {

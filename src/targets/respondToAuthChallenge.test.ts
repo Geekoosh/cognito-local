@@ -19,6 +19,7 @@ import * as TDB from "../__tests__/testDataBuilder";
 import {
   CodeMismatchError,
   InvalidParameterError,
+  MFAMethodNotFoundError,
   NotAuthorizedError,
 } from "../errors";
 import type {
@@ -58,6 +59,7 @@ describe("RespondToAuthChallenge target", () => {
     mockTriggers = newMockTriggers();
     mockUserPoolService = newMockUserPoolService({
       Id: userPoolClient.UserPoolId,
+      SoftwareTokenMfaConfiguration: { Enabled: true },
     });
     mockMessages = newMockMessages();
     mockOtp = vi.fn().mockReturnValue("123456");
@@ -160,10 +162,12 @@ describe("RespondToAuthChallenge target", () => {
         ClientId: userPoolClient.ClientId,
         ChallengeName: "MFA_SETUP",
         ChallengeResponses: { USERNAME: user.Username },
-        Session: "verified-session",
+        Session: "verified-mfa-session-token",
       });
 
-      expect(mockSessions.consume).toHaveBeenCalledWith("verified-session");
+      expect(mockSessions.consume).toHaveBeenCalledWith(
+        "verified-mfa-session-token",
+      );
       expect(mockUserPoolService.saveUser).toHaveBeenCalledWith(TestContext, {
         ...user,
         UserLastModifiedDate: currentDate,
@@ -188,7 +192,7 @@ describe("RespondToAuthChallenge target", () => {
         ClientId: userPoolClient.ClientId,
         ChallengeName: "MFA_SETUP" as const,
         ChallengeResponses: { USERNAME: user.Username },
-        Session: "one-time-session",
+        Session: "one-time-mfa-session-token",
       };
 
       await respondToAuthChallenge(TestContext, request);
@@ -214,7 +218,7 @@ describe("RespondToAuthChallenge target", () => {
           ClientId: userPoolClient.ClientId,
           ChallengeName: "MFA_SETUP",
           ChallengeResponses: { USERNAME: user.Username },
-          Session: "unverified-session",
+          Session: "unverified-mfa-session-token",
         }),
       ).rejects.toEqual(
         new InvalidParameterError("User has not verified software token MFA"),
@@ -236,7 +240,7 @@ describe("RespondToAuthChallenge target", () => {
           ClientId: userPoolClient.ClientId,
           ChallengeName: "MFA_SETUP",
           ChallengeResponses: { USERNAME: user.Username },
-          Session: "mismatched-session",
+          Session: "mismatched-mfa-session-token",
         }),
       ).rejects.toEqual(
         new NotAuthorizedError("Invalid session for the user."),
@@ -261,7 +265,7 @@ describe("RespondToAuthChallenge target", () => {
           ClientId: userPoolClient.ClientId,
           ChallengeName: "MFA_SETUP",
           ChallengeResponses: { USERNAME: user.Username },
-          Session: "mismatched-session",
+          Session: "mismatched-mfa-session-token",
         }),
       ).rejects.toEqual(
         new NotAuthorizedError("Invalid session for the user."),
@@ -620,7 +624,11 @@ describe("RespondToAuthChallenge target", () => {
             ANSWER: "BOGUS",
           },
         }),
-      ).rejects.toBeInstanceOf(InvalidParameterError);
+      ).rejects.toEqual(
+        new MFAMethodNotFoundError(
+          "The selected MFA method is not configured for the user.",
+        ),
+      );
     });
   });
 });

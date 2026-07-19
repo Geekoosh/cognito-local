@@ -7,10 +7,15 @@ import {
   CodeMismatchError,
   InvalidParameterError,
   NotAuthorizedError,
+  SoftwareTokenMFANotFoundError,
 } from "../errors";
 import type { Services } from "../services";
 import type { Token } from "../services/tokenGenerator";
 import { verify } from "../services/totp";
+import {
+  validateMfaAuthorization,
+  validateTotpUserCode,
+} from "./mfaValidation";
 import type { Target } from "./Target";
 
 export type VerifySoftwareTokenTarget = Target<
@@ -26,14 +31,9 @@ export const VerifySoftwareToken =
     sessions,
   }: VerifySoftwareTokenServices): VerifySoftwareTokenTarget =>
   async (ctx, req) => {
-    if (!req.UserCode) {
-      throw new InvalidParameterError("Missing required parameter UserCode");
-    }
-    if (!req.AccessToken && !req.Session) {
-      throw new InvalidParameterError(
-        "Either AccessToken or Session is required",
-      );
-    }
+    validateTotpUserCode(req.UserCode);
+    validateMfaAuthorization(req.AccessToken, req.Session);
+
     if (!req.AccessToken) {
       const session = sessions.get(req.Session as string);
       if (!session || session.purpose !== "MFA_SETUP") {
@@ -41,6 +41,10 @@ export const VerifySoftwareToken =
       }
 
       const userPool = await cognito.getUserPool(ctx, session.userPoolId);
+      if (!userPool.options.SoftwareTokenMfaConfiguration?.Enabled) {
+        throw new SoftwareTokenMFANotFoundError();
+      }
+
       const user = await userPool.getUserByUsername(ctx, session.username);
       if (!user) {
         throw new NotAuthorizedError("Invalid session for the user.");
@@ -87,13 +91,17 @@ export const VerifySoftwareToken =
 
     const decoded = jwt.decode(req.AccessToken) as Token | null;
     if (!decoded) {
-      throw new InvalidParameterError();
+      throw new NotAuthorizedError("Invalid Access Token");
     }
 
     const userPool = await cognito.getUserPoolForClientId(
       ctx,
       decoded.client_id,
     );
+    if (!userPool.options.SoftwareTokenMfaConfiguration?.Enabled) {
+      throw new SoftwareTokenMFANotFoundError();
+    }
+
     const user = await userPool.getUserByUsername(ctx, decoded.sub);
     if (!user) {
       throw new NotAuthorizedError();
